@@ -1,0 +1,131 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default-deny all document access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Validation Helpers
+    function isValidUser(data) {
+      return data.keys().hasAll(['id', 'name', 'username', 'status', 'createdAt'])
+        && data.id is string && isValidId(data.id)
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 60
+        && data.username is string && data.username.size() >= 3 && data.username.size() <= 30
+        && data.status in ['online', 'away', 'busy', 'offline']
+        && data.createdAt is number;
+    }
+
+    function isValidChat(data) {
+      return data.keys().hasAll(['id', 'type', 'name', 'participantIds', 'createdAt'])
+        && data.id is string && isValidId(data.id)
+        && data.type in ['direct', 'group']
+        && data.name is string && data.name.size() <= 100
+        && data.participantIds is list && data.participantIds.size() <= 100
+        && data.createdAt is number;
+    }
+
+    function isValidMessage(data) {
+      return data.keys().hasAll(['id', 'chatId', 'senderId', 'text', 'timestamp', 'type'])
+        && data.id is string && isValidId(data.id)
+        && data.chatId is string && isValidId(data.chatId)
+        && data.senderId is string && isValidId(data.senderId)
+        && data.text is string && data.text.size() <= 4000
+        && data.type in ['text', 'image', 'voice', 'file']
+        && data.timestamp is number;
+    }
+
+    function isValidStory(data) {
+      return data.keys().hasAll(['id', 'userId', 'type', 'content', 'createdAt', 'expiresAt'])
+        && data.id is string && isValidId(data.id)
+        && data.userId is string && isValidId(data.userId)
+        && data.type in ['image', 'text']
+        && data.content is string && data.content.size() <= 2048
+        && data.createdAt is number
+        && data.expiresAt is number;
+    }
+
+    // User Directory & Profiles
+    match /users/{userId} {
+      allow read: if isSignedIn() && isValidId(userId);
+      allow create: if isOwner(userId) && isValidId(userId) && isValidUser(incoming()) && incoming().id == userId;
+      allow update: if isOwner(userId) && isValidId(userId) && isValidUser(incoming()) 
+        && incoming().id == existing().id 
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if false; // User profiles cannot be deleted without admin intervention
+    }
+
+    // Chats and Group Conversations
+    match /chats/{chatId} {
+      allow read: if isSignedIn() && isValidId(chatId) && request.auth.uid in resource.data.participantIds;
+      allow create: if isSignedIn() && isValidId(chatId) && isValidChat(incoming()) 
+        && request.auth.uid in incoming().participantIds;
+      allow update: if isSignedIn() && isValidId(chatId) && isValidChat(incoming())
+        && request.auth.uid in existing().participantIds
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if isSignedIn() && isValidId(chatId) 
+        && ((existing().type == 'group' && existing().createdBy == request.auth.uid) 
+            || (existing().type == 'direct' && request.auth.uid in existing().participantIds));
+
+      // Messages Sub-collection
+      match /messages/{messageId} {
+        allow read: if isSignedIn() && isValidId(chatId) && isValidId(messageId)
+          && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participantIds;
+        allow create: if isSignedIn() && isValidId(chatId) && isValidId(messageId)
+          && isValidMessage(incoming())
+          && incoming().senderId == request.auth.uid
+          && incoming().chatId == chatId
+          && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participantIds;
+        allow update: if isSignedIn() && isValidId(chatId) && isValidId(messageId)
+          && isValidMessage(incoming())
+          && incoming().senderId == existing().senderId
+          && (
+            // Edit own message text
+            (existing().senderId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['text', 'isEdited']))
+            // Add/toggle reaction by any conversation participant
+            || (request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participantIds 
+                && incoming().diff(existing()).affectedKeys().hasOnly(['reactions']))
+          );
+        allow delete: if isSignedIn() && isValidId(chatId) && isValidId(messageId)
+          && (existing().senderId == request.auth.uid 
+              || get(/databases/$(database)/documents/chats/$(chatId)).data.createdBy == request.auth.uid);
+      }
+    }
+
+    // 24-hour Status Stories
+    match /stories/{storyId} {
+      allow read: if isSignedIn() && isValidId(storyId);
+      allow create: if isSignedIn() && isValidId(storyId) && isValidStory(incoming()) 
+        && incoming().userId == request.auth.uid;
+      allow update: if isSignedIn() && isValidId(storyId) && isValidStory(incoming())
+        && (
+          // Mark view by participant
+          incoming().diff(existing()).affectedKeys().hasOnly(['views'])
+        );
+      allow delete: if isSignedIn() && isValidId(storyId) && existing().userId == request.auth.uid;
+    }
+  }
+}

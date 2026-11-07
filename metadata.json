@@ -1,0 +1,11 @@
+{
+  "name": "Remix ARChat",
+  "description": "ARChat by AR Tech - Real-time messaging and social communication platform inspired by Telegram and WhatsApp with instant messaging, voice notes, media sharing, group chats, stories, and rich customization.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
